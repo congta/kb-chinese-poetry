@@ -146,4 +146,6 @@ vite.config.ts.timestamp-*
 .memory-inspect.sqlite-wal
 duplicate.md
 duplicate_song.md
+duplicate_ming.md
+duplicate_qing.md
 note.txt
