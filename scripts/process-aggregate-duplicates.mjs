@@ -119,6 +119,63 @@ function parseReport(markdown) {
   return { lines, sections };
 }
 
+function reorderRelevantDisorderedSections(records, endpoints) {
+  const numbered = records.map(titleInfo).filter(Boolean);
+  const groups = new Map();
+  const reportRecords = new Map();
+  for (const record of records) {
+    const key = endpointKey(record.authorName, record.title);
+    if (!endpoints.has(key)) continue;
+    if (!reportRecords.has(key)) reportRecords.set(key, []);
+    reportRecords.get(key).push(record);
+  }
+  for (const item of numbered) {
+    const key = endpointKey(item.authorName, item.base);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+
+  const selected = new Map();
+  for (const [key, items] of groups) {
+    if (items.length < 2) continue;
+    const author = items[0].authorName;
+    const relevant = items.some((item) => [item.title, item.title.replace(stripNumberRe, '')]
+      .some((title) => (reportRecords.get(endpointKey(author, title)) ?? [])
+        .some((aggregate) => aggregate.id !== item.id)));
+    if (!relevant) continue;
+    const disordered = items.some((item, index) => index > 0 && item.number < items[index - 1].number);
+    if (!disordered) continue;
+    selected.set(key, {
+      firstIndex: items[0].index,
+      indexes: new Set(items.map((item) => item.index)),
+      records: [...items]
+        .sort((a, b) => a.number - b.number || a.index - b.index)
+        .map((item) => records[item.index]),
+    });
+  }
+
+  if (!selected.size) return { records, groupsReordered: 0, recordsReordered: 0 };
+  const indexToGroup = new Map();
+  for (const [key, group] of selected) {
+    for (const index of group.indexes) indexToGroup.set(index, key);
+  }
+  const next = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const key = indexToGroup.get(index);
+    if (!key) {
+      next.push(records[index]);
+      continue;
+    }
+    const group = selected.get(key);
+    if (index === group.firstIndex) next.push(...group.records);
+  }
+  return {
+    records: next,
+    groupsReordered: selected.size,
+    recordsReordered: [...selected.values()].reduce((sum, group) => sum + group.records.length, 0),
+  };
+}
+
 function dynastyFromPath(reportFile) {
   return reportFile.split('/')[0].replace(/^\d+\./, '');
 }
@@ -210,7 +267,17 @@ for (const [reportFile, section] of report.sections) {
     missingFiles.push(reportFile);
     continue;
   }
-  files.push({ reportFile, absolute, section, records: JSON.parse(fs.readFileSync(absolute, 'utf8')) });
+  const originalRecords = JSON.parse(fs.readFileSync(absolute, 'utf8'));
+  const reordered = reorderRelevantDisorderedSections(originalRecords, section.endpoints);
+  files.push({
+    reportFile,
+    absolute,
+    section,
+    originalRecords,
+    records: reordered.records,
+    groupsReordered: reordered.groupsReordered,
+    recordsReordered: reordered.recordsReordered,
+  });
 }
 
 const candidates = [];
@@ -341,6 +408,8 @@ console.log(JSON.stringify({
   candidatesWithReportRows: selectedCandidates.length,
   reportRowsToRemove: reportLineIndexes.size,
   unmatchedCandidatePairs: unmatchedCandidatePairs.length,
+  groupsReordered: files.reduce((sum, file) => sum + file.groupsReordered, 0),
+  recordsReordered: files.reduce((sum, file) => sum + file.recordsReordered, 0),
   byFile: [...byFile].map(([file, items]) => ({ file, count: items.length })),
 }, null, 2));
 
@@ -374,7 +443,7 @@ if (!write) process.exit(0);
 
 for (const file of files) {
   const ids = new Set((byFile.get(file.reportFile) ?? []).map((item) => item.aggregate.id));
-  if (!ids.size) continue;
+  if (!ids.size && !file.groupsReordered) continue;
   const next = file.records.filter((record) => !ids.has(record.id));
   fs.writeFileSync(file.absolute, `${JSON.stringify(next, null, 2)}\n`);
 }
